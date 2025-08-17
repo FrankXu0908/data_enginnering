@@ -1,0 +1,100 @@
+services:
+  minio: # data lake
+    image: minio/minio
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      # MINIO_BROWSER_REDIRECT_URL: http://localhost:9001
+    volumes:
+      - minio_data:/data
+      # - minio_config:/root/.minio/
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  minio-client:
+    image: minio/mc
+    container_name: minio-client
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./init-minio.sh:/init-minio.sh
+    entrypoint: /bin/sh -c "sleep 15 && sh /init-minio.sh"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+
+  kafka: # Kafka broker with controller quorum
+    image: bitnami/kafka:latest
+    container_name: kafka
+    environment:
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_LOG_RETENTION_HOURS=24
+      - KAFKA_LOG_RETENTION_BYTES=1073741824
+    volumes:
+      - ./kafka-data:/bitnami/kafka
+    ports:
+      - "9092:9092"     # for producing/consuming messages
+      - "9093:9093"     # for controller quorum communication
+    healthcheck:
+      test: ["CMD", "/opt/bitnami/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  
+  kafka-producer: # Kafka producer
+    build: ./producer
+    container_name: kafka-producer
+    volumes:
+      - ./producer:/app
+    environment:
+      KAFKA_BROKER: "kafka:9092"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    extra_hosts:
+    - "host.docker.internal:host-gateway"
+    command: python /app/kafka_producer.py
+
+  kafka-consumer:
+    container_name: kafka-consumer
+    volumes:
+      - ./consumer:/app
+      - ./processing:/app/processing
+      - ./storage:/app/storage
+    build:
+      context: ./consumer  # assuming you put your consumer code in the "consumer" folder
+    environment:
+      KAFKA_BROKER: "kafka:9092"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "minioadmin"
+      MINIO_SECRET_KEY: "minioadmin"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-client:
+        condition: service_completed_successfully
+    command: python -u /app/consumer.py
+
+volumes:
+  minio_data:
+  kafka-data:

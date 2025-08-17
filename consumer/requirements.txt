@@ -1,0 +1,6 @@
+kafka-python
+polars
+boto3
+pathlib
+
+
